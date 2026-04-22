@@ -11,93 +11,119 @@ async function executarColeta(opcoes = {}) {
     perfilForçado = null,
   } = opcoes;
 
+  // 1. Lê cookie PRIMEIRO antes de qualquer operação
   const cookie = await getCookie();
   if (!cookie) throw new Error('Cookie ML não encontrado no Redis');
+  log(`[COOKIE] Cookie lido: ${cookie.substring(0, 40)}...`);
 
-  // Seleciona perfil
+  // 2. Seleciona perfil
   const idx = perfilForçado !== null ? perfilForçado : await getPerfilIndex();
   const perfil = PERFIS[idx % PERFIS.length];
-  log(`[PERFIL] Executando Perfil ${perfil.id}: ${perfil.nome}`);
+  log(`[PERFIL] Perfil ${perfil.id}: ${perfil.nome} (idx=${idx})`);
 
-  // Avança índice para próxima execução (exceto dry run)
-  if (!dry) await avancarPerfilIndex(PERFIS.length);
+  // 3. Avança índice para PRÓXIMA execução (exceto dry)
+  if (!dry && perfilForçado === null) {
+    await avancarPerfilIndex(PERFIS.length);
+  }
 
+  // 4. Calcula limites por fonte
   const limite = settings.LIMITE_POR_EXECUCAO;
-  const limiteCat = perfil.categorias_extra.length > 0
-    ? Math.floor(limite * 0.4)  // 40% de categorias extra
-    : 0;
-  const limiteGE = limite - limiteCat;
+  const temCatsExtra = perfil.categorias_extra.length > 0;
+  const limiteCat = temCatsExtra ? Math.floor(limite * 0.4) : 0;
+  const limiteGE  = limite - limiteCat;
 
-  // 1. Coleta Ganhos Extras
+  log(`[LIMITES] GE:${limiteGE} | Categorias:${limiteCat} | Total:${limite}`);
+
+  // 5. Coleta Ganhos Extras (sempre — base de todos os perfis)
   let brutos = [];
-  log(`[COLETA] Buscando ${limiteGE} de Ganhos Extras...`);
-  const ge = await coletarGanhosExtras(cookie, limiteGE * 3); // coleta mais para ter margem de filtro
-  brutos.push(...ge);
+  log(`[COLETA] Buscando Ganhos Extras (limite bruto: ${limiteGE * 3})...`);
+  try {
+    const ge = await coletarGanhosExtras(cookie, limiteGE * 3);
+    brutos.push(...ge);
+    log(`[COLETA] Ganhos Extras: ${ge.length} produtos`);
+  } catch(e) {
+    err('[COLETA] Erro Ganhos Extras:', e.message);
+  }
 
-  // 2. Coleta categorias extras do perfil
-  if (perfil.categorias_extra.length > 0 && limiteCat > 0) {
-    const porCat = Math.ceil(limiteCat / perfil.categorias_extra.length);
+  // 6. Coleta categorias extras do perfil
+  if (temCatsExtra && limiteCat > 0) {
+    const porCat = Math.ceil((limiteCat * 3) / perfil.categorias_extra.length);
     for (const cat of perfil.categorias_extra) {
-      log(`[COLETA] Buscando categoria: ${cat}`);
-      const items = await coletarCategoria(cookie, cat, porCat * 2);
-      brutos.push(...items);
+      try {
+        log(`[COLETA] Categoria: ${cat} (limite: ${porCat})`);
+        const items = await coletarCategoria(cookie, cat, porCat);
+        brutos.push(...items);
+        log(`[COLETA] ${cat}: ${items.length} produtos`);
+      } catch(e) {
+        err(`[COLETA] Erro categoria ${cat}:`, e.message);
+      }
     }
   }
 
   const totalBrutos = brutos.length;
-  log(`[FILTRO] Brutos coletados: ${totalBrutos}`);
+  log(`[FILTRO] Total brutos: ${totalBrutos}`);
 
-  // 3. Remove nulos e deduplicação interna por ID
-  brutos = brutos.filter(p => p && p.ID && p.LINK_ORIGINAL);
+  if (totalBrutos === 0) {
+    log('[AVISO] Nenhum produto coletado — verifique cookie e logs do hub');
+    return { ok: true, perfil: { id: perfil.id, nome: perfil.nome }, brutos: 0, apos_dedup: 0, apos_filtros: 0, apos_redis: 0, validos: 0, limite_execucao: limite, produtos: [] };
+  }
+
+  // 7. Remove nulos
+  let validos = brutos.filter(p => p && p.ID && p.LINK_ORIGINAL);
+  log(`[FILTRO] Após remover nulos: ${validos.length}`);
+
+  // 8. Dedup interna por ID
   const seenIds = new Set();
-  brutos = brutos.filter(p => {
+  validos = validos.filter(p => {
     if (seenIds.has(p.ID)) return false;
     seenIds.add(p.ID);
     return true;
   });
-  log(`[FILTRO] Após dedup interna: ${brutos.length}`);
+  const aposDedup = validos.length;
+  log(`[FILTRO] Após dedup interna: ${aposDedup}`);
 
-  // 4. Filtros globais de qualidade
-  brutos = brutos.filter(p => aplicarFiltrosGlobais(p));
-  log(`[FILTRO] Após filtros globais: ${brutos.length}`);
+  // 9. Filtros globais de qualidade
+  validos = validos.filter(p => aplicarFiltrosGlobais(p));
+  log(`[FILTRO] Após filtros globais: ${validos.length}`);
 
-  // 5. Filtros específicos do perfil
-  brutos = brutos.filter(p => aplicarFiltrosPerfil(p, perfil.filtros));
-  log(`[FILTRO] Após filtros perfil: ${brutos.length}`);
+  // 10. Filtros específicos do perfil
+  validos = validos.filter(p => aplicarFiltrosPerfil(p, perfil.filtros));
+  const aposFiltros = validos.length;
+  log(`[FILTRO] Após filtros perfil (${perfil.nome}): ${aposFiltros}`);
 
-  // 6. Filtro Redis 24h (exceto dry)
-  let aposRedis = brutos;
+  // 11. Filtro Redis 24h (exceto dry)
+  let aposRedis = validos;
   if (!dry) {
-    const checks = await Promise.all(brutos.map(p => jaPostado(p.ID)));
-    aposRedis = brutos.filter((_, i) => !checks[i]);
-    log(`[REDIS] Bloqueados (24h): ${brutos.length - aposRedis.length} | Disponíveis: ${aposRedis.length}`);
+    const checks = await Promise.all(validos.map(p => jaPostado(p.ID)));
+    aposRedis = validos.filter((_, i) => !checks[i]);
+    log(`[REDIS] Bloqueados: ${validos.length - aposRedis.length} | Disponíveis: ${aposRedis.length}`);
   }
 
-  // 7. Limita ao máximo do perfil
-  const validos = aposRedis.slice(0, limite);
-  log(`[FINAL] Produtos válidos para retorno: ${validos.length}`);
+  // 12. Limita ao máximo configurado
+  const finaisSemAfiliado = aposRedis.slice(0, limite);
+  log(`[FINAL] Produtos para retorno: ${finaisSemAfiliado.length}`);
 
-  // 8. Gera links afiliado (shortlink meli.la)
-  let finais = validos;
-  if (gerarAfiliado && validos.length > 0 && !dry) {
-    log(`[AFILIADO] Gerando ${validos.length} shortlinks meli.la...`);
-    finais = await processarLoteAfiliado(validos);
+  // 13. Gera shortlinks meli.la (idêntico ao workflow n8n)
+  let finais = finaisSemAfiliado;
+  if (gerarAfiliado && finaisSemAfiliado.length > 0 && !dry) {
+    log(`[AFILIADO] Gerando ${finaisSemAfiliado.length} shortlinks meli.la...`);
+    finais = await processarLoteAfiliado(finaisSemAfiliado);
+    const comLink = finais.filter(p => p.LINK_AFILIADO).length;
+    log(`[AFILIADO] ${comLink}/${finais.length} shortlinks gerados com sucesso`);
   }
 
-  // 9. Marca como postados no Redis (exceto dry)
+  // 14. Marca como vistos no Redis (exceto dry)
   if (!dry && finais.length > 0) {
-    await Promise.all(
-      finais.map(p => marcarPostado(p.ID, settings.DEDUPE_TTL_HORAS))
-    );
-    log(`[REDIS] ${finais.length} produtos marcados (TTL ${settings.DEDUPE_TTL_HORAS}h)`);
+    await Promise.all(finais.map(p => marcarPostado(p.ID, settings.DEDUPE_TTL_HORAS)));
+    log(`[REDIS] ${finais.length} produtos marcados (TTL: ${settings.DEDUPE_TTL_HORAS}h)`);
   }
 
   return {
     ok: true,
     perfil: { id: perfil.id, nome: perfil.nome },
     brutos: totalBrutos,
-    apos_dedup: brutos.length,
-    apos_filtros: aposRedis.length,
+    apos_dedup: aposDedup,
+    apos_filtros: aposFiltros,
     apos_redis: aposRedis.length,
     validos: finais.length,
     limite_execucao: limite,
@@ -107,14 +133,17 @@ async function executarColeta(opcoes = {}) {
 
 function aplicarFiltrosGlobais(p) {
   if (FILTROS_GLOBAIS.EXIGE_IMAGEM && !p.LINK_IMAGEM) return false;
-  if (p.PRECO_POR && p.PRECO_POR < FILTROS_GLOBAIS.PRECO_MIN) return false;
-  if (p.DESCONTO_PCT !== null && p.DESCONTO_PCT < FILTROS_GLOBAIS.DESCONTO_MIN) return false;
+  if (p.PRECO_POR !== null && p.PRECO_POR < FILTROS_GLOBAIS.PRECO_MIN) return false;
+  if (p.DESCONTO_PCT !== null && p.DESCONTO_PCT !== undefined && p.DESCONTO_PCT < FILTROS_GLOBAIS.DESCONTO_MIN) return false;
   return true;
 }
 
 function aplicarFiltrosPerfil(p, filtros) {
-  if (filtros.comissao_min > 0 && p.COMISSAO_PCT < filtros.comissao_min) return false;
-  if (filtros.desconto_min > 0 && (p.DESCONTO_PCT === null || p.DESCONTO_PCT < filtros.desconto_min)) return false;
+  if (filtros.comissao_min > 0 && (p.COMISSAO_PCT === null || p.COMISSAO_PCT < filtros.comissao_min)) return false;
+  if (filtros.desconto_min > 0) {
+    const desc = p.DESCONTO_PCT;
+    if (desc === null || desc === undefined || desc < filtros.desconto_min) return false;
+  }
   return true;
 }
 

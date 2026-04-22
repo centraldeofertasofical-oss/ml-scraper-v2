@@ -1,161 +1,121 @@
-// src/scrapers/orquestrador.js
-import { coletarTudo, coletarGanhosExtras } from './hub.js';
-import { gerarLinksAfiliado } from './afiliado.js';
-import { jaPostado, marcarPostadoLote } from '../utils/redis.js';
-import { logInfo, logError } from '../utils/logger.js';
+const { settings, FILTROS_GLOBAIS, PERFIS } = require('../config/settings');
+const { coletarGanhosExtras, coletarCategoria } = require('./hub');
+const { processarLoteAfiliado } = require('./afiliado');
+const { getCookie, jaPostado, marcarPostado, getPerfilIndex, avancarPerfilIndex } = require('../utils/redis');
+const { log, err } = require('../utils/logger');
 
-// Deduplica por ID dentro da própria coleta
-function deduplicarInternamente(produtos = []) {
-  const seen = new Map();
-  for (const p of produtos) {
-    const key = p.ID;
-    if (!key || seen.has(key)) continue;
-    seen.set(key, p);
-  }
-  return Array.from(seen.values());
-}
+async function executarColeta(opcoes = {}) {
+  const {
+    gerarAfiliado = true,
+    dry = false,
+    perfilForçado = null,
+  } = opcoes;
 
-// Filtra produtos já postados nas últimas 24h (Redis)
-async function filtrarJaPostados(produtos = []) {
-  const novos = [];
-  for (const p of produtos) {
-    const bloqueado = await jaPostado(p.ID);
-    if (!bloqueado) novos.push(p);
-  }
-  return novos;
-}
+  const cookie = await getCookie();
+  if (!cookie) throw new Error('Cookie ML não encontrado no Redis');
 
-// Filtra qualidade mínima
-function filtrarQualidade(produtos = []) {
-  return produtos.filter(p =>
-    p.PRODUTO &&
-    p.LINK_ORIGINAL &&
-    p.PRECO_POR &&
-    p.PRECO_POR > 0 &&
-    p.PRECO_POR < 10000
-  );
-}
+  // Seleciona perfil
+  const idx = perfilForçado !== null ? perfilForçado : await getPerfilIndex();
+  const perfil = PERFIS[idx % PERFIS.length];
+  log(`[PERFIL] Executando Perfil ${perfil.id}: ${perfil.nome}`);
 
-// ─── Coleta completa orquestrada ──────────────────────────────────────────────
+  // Avança índice para próxima execução (exceto dry run)
+  if (!dry) await avancarPerfilIndex(PERFIS.length);
 
-export async function executarColeta({ 
-  incluirCategorias = true,
-  gerarAfiliado = true,
-  marcarRedis = true,
-  dryRun = false,
-} = {}) {
+  const limite = settings.LIMITE_POR_EXECUCAO;
+  const limiteCat = perfil.categorias_extra.length > 0
+    ? Math.floor(limite * 0.4)  // 40% de categorias extra
+    : 0;
+  const limiteGE = limite - limiteCat;
 
-  const inicio = Date.now();
-  logInfo('=== INICIANDO COLETA COMPLETA ===');
+  // 1. Coleta Ganhos Extras
+  let brutos = [];
+  log(`[COLETA] Buscando ${limiteGE} de Ganhos Extras...`);
+  const ge = await coletarGanhosExtras(cookie, limiteGE * 3); // coleta mais para ter margem de filtro
+  brutos.push(...ge);
 
-  const resultado = {
-    ok: true,
-    inicio: new Date().toISOString(),
-    fim: null,
-    duracao_segundos: null,
-    fontes: [],
-    stats: {
-      brutos: 0,
-      apos_dedup_interna: 0,
-      apos_filtro_redis: 0,
-      apos_filtro_qualidade: 0,
-      com_link_afiliado: 0,
-      sem_link_afiliado: 0,
-    },
-    produtos: [],
-  };
-
-  try {
-    // 1. COLETA
-    logInfo('ETAPA 1: Coleta do Hub de Afiliados');
-    const { fontes, produtos_brutos } = await coletarTudo({ incluirCategorias });
-    resultado.fontes = fontes;
-    resultado.stats.brutos = produtos_brutos.length;
-    logInfo(`Coleta concluída: ${produtos_brutos.length} produtos brutos`);
-
-    // 2. DEDUP INTERNA
-    logInfo('ETAPA 2: Deduplicação interna por ID');
-    const deduped = deduplicarInternamente(produtos_brutos);
-    resultado.stats.apos_dedup_interna = deduped.length;
-    logInfo(`Após dedup interna: ${deduped.length} produtos únicos`);
-
-    // 3. FILTRO REDIS (já postados 24h)
-    logInfo('ETAPA 3: Filtro Redis 24h');
-    const novos = dryRun ? deduped : await filtrarJaPostados(deduped);
-    resultado.stats.apos_filtro_redis = novos.length;
-    logInfo(`Após filtro Redis: ${novos.length} produtos novos (${deduped.length - novos.length} bloqueados)`);
-
-    // 4. FILTRO DE QUALIDADE
-    logInfo('ETAPA 4: Filtro de qualidade');
-    const validos = filtrarQualidade(novos);
-    resultado.stats.apos_filtro_qualidade = validos.length;
-    logInfo(`Após filtro qualidade: ${validos.length} produtos válidos`);
-
-    if (!validos.length) {
-      logInfo('Nenhum produto válido para processar');
-      resultado.produtos = [];
-      resultado.stats.com_link_afiliado = 0;
-      resultado.stats.sem_link_afiliado = 0;
-    } else {
-      // 5. GERAÇÃO DE LINKS DE AFILIADO
-      let produtosFinais = validos;
-
-      if (gerarAfiliado && !dryRun) {
-        logInfo('ETAPA 5: Geração de links de afiliado');
-        produtosFinais = await gerarLinksAfiliado(validos);
-      }
-
-      resultado.stats.com_link_afiliado = produtosFinais.filter(p => p.LINK_AFILIADO).length;
-      resultado.stats.sem_link_afiliado = produtosFinais.filter(p => !p.LINK_AFILIADO).length;
-
-      // 6. MARCA NO REDIS (somente os que têm link afiliado)
-      if (marcarRedis && !dryRun) {
-        logInfo('ETAPA 6: Marcando no Redis');
-        const idsParaMarcar = produtosFinais
-          .filter(p => p.LINK_AFILIADO)
-          .map(p => p.ID);
-        await marcarPostadoLote(idsParaMarcar);
-        logInfo(`${idsParaMarcar.length} IDs marcados no Redis (TTL 24h)`);
-      }
-
-      resultado.produtos = produtosFinais;
+  // 2. Coleta categorias extras do perfil
+  if (perfil.categorias_extra.length > 0 && limiteCat > 0) {
+    const porCat = Math.ceil(limiteCat / perfil.categorias_extra.length);
+    for (const cat of perfil.categorias_extra) {
+      log(`[COLETA] Buscando categoria: ${cat}`);
+      const items = await coletarCategoria(cookie, cat, porCat * 2);
+      brutos.push(...items);
     }
-
-  } catch (err) {
-    logError('Erro fatal na coleta', err?.message);
-    resultado.ok = false;
-    resultado.erro = err?.message;
   }
 
-  const fim = Date.now();
-  resultado.fim = new Date().toISOString();
-  resultado.duracao_segundos = Math.round((fim - inicio) / 1000);
-  resultado.total = resultado.produtos.length;
+  const totalBrutos = brutos.length;
+  log(`[FILTRO] Brutos coletados: ${totalBrutos}`);
 
-  logInfo('=== COLETA FINALIZADA ===', {
-    duracao: `${resultado.duracao_segundos}s`,
-    stats: resultado.stats,
+  // 3. Remove nulos e deduplicação interna por ID
+  brutos = brutos.filter(p => p && p.ID && p.LINK_ORIGINAL);
+  const seenIds = new Set();
+  brutos = brutos.filter(p => {
+    if (seenIds.has(p.ID)) return false;
+    seenIds.add(p.ID);
+    return true;
   });
+  log(`[FILTRO] Após dedup interna: ${brutos.length}`);
 
-  return resultado;
-}
+  // 4. Filtros globais de qualidade
+  brutos = brutos.filter(p => aplicarFiltrosGlobais(p));
+  log(`[FILTRO] Após filtros globais: ${brutos.length}`);
 
-// Coleta rápida só de Ganhos Extras (para testes)
-export async function executarColetaRapida() {
-  logInfo('=== COLETA RÁPIDA: Só Ganhos Extras ===');
+  // 5. Filtros específicos do perfil
+  brutos = brutos.filter(p => aplicarFiltrosPerfil(p, perfil.filtros));
+  log(`[FILTRO] Após filtros perfil: ${brutos.length}`);
 
-  const produtos = await coletarGanhosExtras();
-  const deduped = deduplicarInternamente(produtos);
-  const novos = await filtrarJaPostados(deduped);
-  const validos = filtrarQualidade(novos);
+  // 6. Filtro Redis 24h (exceto dry)
+  let aposRedis = brutos;
+  if (!dry) {
+    const checks = await Promise.all(brutos.map(p => jaPostado(p.ID)));
+    aposRedis = brutos.filter((_, i) => !checks[i]);
+    log(`[REDIS] Bloqueados (24h): ${brutos.length - aposRedis.length} | Disponíveis: ${aposRedis.length}`);
+  }
+
+  // 7. Limita ao máximo do perfil
+  const validos = aposRedis.slice(0, limite);
+  log(`[FINAL] Produtos válidos para retorno: ${validos.length}`);
+
+  // 8. Gera links afiliado (shortlink meli.la)
+  let finais = validos;
+  if (gerarAfiliado && validos.length > 0 && !dry) {
+    log(`[AFILIADO] Gerando ${validos.length} shortlinks meli.la...`);
+    finais = await processarLoteAfiliado(validos);
+  }
+
+  // 9. Marca como postados no Redis (exceto dry)
+  if (!dry && finais.length > 0) {
+    await Promise.all(
+      finais.map(p => marcarPostado(p.ID, settings.DEDUPE_TTL_HORAS))
+    );
+    log(`[REDIS] ${finais.length} produtos marcados (TTL ${settings.DEDUPE_TTL_HORAS}h)`);
+  }
 
   return {
     ok: true,
-    fonte: 'GANHOS_EXTRAS',
-    brutos: produtos.length,
-    apos_dedup: deduped.length,
-    apos_redis: novos.length,
-    validos: validos.length,
-    produtos: validos,
+    perfil: { id: perfil.id, nome: perfil.nome },
+    brutos: totalBrutos,
+    apos_dedup: brutos.length,
+    apos_filtros: aposRedis.length,
+    apos_redis: aposRedis.length,
+    validos: finais.length,
+    limite_execucao: limite,
+    produtos: finais,
   };
 }
+
+function aplicarFiltrosGlobais(p) {
+  if (FILTROS_GLOBAIS.EXIGE_IMAGEM && !p.LINK_IMAGEM) return false;
+  if (p.PRECO_POR && p.PRECO_POR < FILTROS_GLOBAIS.PRECO_MIN) return false;
+  if (p.DESCONTO_PCT !== null && p.DESCONTO_PCT < FILTROS_GLOBAIS.DESCONTO_MIN) return false;
+  return true;
+}
+
+function aplicarFiltrosPerfil(p, filtros) {
+  if (filtros.comissao_min > 0 && p.COMISSAO_PCT < filtros.comissao_min) return false;
+  if (filtros.desconto_min > 0 && (p.DESCONTO_PCT === null || p.DESCONTO_PCT < filtros.desconto_min)) return false;
+  return true;
+}
+
+module.exports = { executarColeta };

@@ -1,0 +1,103 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 6,16 * * *" }
+          ]
+        }
+      },
+      "id": "trigger-main",
+      "name": "⏰ TRIGGER (6h e 16h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1400, 400]
+    },
+
+    {
+      "parameters": {
+        "url": "https://SEU-PROJETO.up.railway.app/coletar",
+        "options": { "timeout": 600000 }
+      },
+      "id": "coletar-api",
+      "name": "🌐 GET /coletar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1160, 400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Verifica se a coleta retornou produtos\nconst res = $input.first().json;\n\nif (!res.ok) {\n  throw new Error(`Coleta falhou: ${res.erro || 'Erro desconhecido'}`);\n}\n\nconst produtos = res.produtos || [];\n\nif (!produtos.length) {\n  console.log('Nenhum produto novo nesta execução.');\n  return [];\n}\n\nconsole.log(`Coleta OK: ${produtos.length} produtos | Stats:`, JSON.stringify(res.stats));\n\n// Explode em itens individuais para o Google Sheets\nreturn produtos.map(p => ({ json: p }));\n"
+      },
+      "id": "explodir",
+      "name": "💥 Explodir Produtos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-900, 400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Formata campos para a planilha\nconst p = $input.item.json;\n\nconst formatBRL = v => v != null ? `R$ ${Number(v).toFixed(2).replace('.', ',')}` : '';\n\nreturn {\n  json: {\n    ID:              p.ID || '',\n    PLATAFORMA:      'Mercado Livre',\n    ORIGEM:          p.ORIGEM || '',\n    PRODUTO:         p.PRODUTO || '',\n    PRECO_DE:        p.PRECO_DE || '',\n    PRECO_POR:       p.PRECO_POR || '',\n    PRECO_DE_TEXTO:  formatBRL(p.PRECO_DE),\n    PRECO_POR_TEXTO: formatBRL(p.PRECO_POR),\n    DESCONTO_PCT:    p.DESCONTO_PCT || '',\n    COMISSAO_PCT:    p.COMISSAO_PCT || '',\n    GANHO_EXTRA:     p.GANHO_EXTRA ? 'SIM' : 'NAO',\n    DESTAQUE:        p.DESTAQUE || '',\n    LINK_ORIGINAL:   p.LINK_ORIGINAL || '',\n    LINK_AFILIADO:   p.LINK_AFILIADO || '',\n    LINK_IMAGEM:     p.LINK_IMAGEM || '',\n    DATA_COLETA:     p.DATA_COLETA || new Date().toISOString(),\n    STATUS:          'NOVO',\n  }\n};\n"
+      },
+      "id": "formatar",
+      "name": "✨ Formatar para Planilha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-640, 400]
+    },
+
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "SEU_GOOGLE_SHEET_ID_AQUI", "mode": "id" },
+        "sheetName":  { "__rl": true, "value": "ML_BRUTOS", "mode": "name" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": []
+        },
+        "options": {}
+      },
+      "id": "gravar-sheets",
+      "name": "📊 Gravar ML_BRUTOS",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-380, 400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconsole.log(`✅ Gravados ${items.length} produtos na planilha ML_BRUTOS`);\nreturn [{ json: { ok: true, gravados: items.length, timestamp: new Date().toISOString() } }];\n"
+      },
+      "id": "log-final",
+      "name": "📋 Log Final",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-120, 400]
+    }
+  ],
+
+  "connections": {
+    "⏰ TRIGGER (6h e 16h)": {
+      "main": [[{ "node": "🌐 GET /coletar", "type": "main", "index": 0 }]]
+    },
+    "🌐 GET /coletar": {
+      "main": [[{ "node": "💥 Explodir Produtos", "type": "main", "index": 0 }]]
+    },
+    "💥 Explodir Produtos": {
+      "main": [[{ "node": "✨ Formatar para Planilha", "type": "main", "index": 0 }]]
+    },
+    "✨ Formatar para Planilha": {
+      "main": [[{ "node": "📊 Gravar ML_BRUTOS", "type": "main", "index": 0 }]]
+    },
+    "📊 Gravar ML_BRUTOS": {
+      "main": [[{ "node": "📋 Log Final", "type": "main", "index": 0 }]]
+    }
+  },
+
+  "meta": {
+    "instanceId": "2f41010ff80c8b649565c9c72bff0cbaccdad6541539c673b443b44c4fa922f8"
+  }
+}

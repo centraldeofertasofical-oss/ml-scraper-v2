@@ -15,14 +15,50 @@ const FILTROS_GLOBAIS = {
   EXIGE_IMAGEM: true,
 };
 
+// IDs reais confirmados na API do hub ML
 const PERFIS = [
-  { id:1, nome:'Top Comissão',    fontes:['GANHOS_EXTRAS'], categorias_extra:[], filtros:{ comissao_min:20, desconto_min:15 } },
-  { id:2, nome:'Moda & Beleza',   fontes:['GANHOS_EXTRAS'], categorias_extra:['fashion_women','fashion_men','shoes','beauty'], filtros:{ comissao_min:0, desconto_min:25 } },
-  { id:3, nome:'Tech & Eletro',   fontes:['GANHOS_EXTRAS'], categorias_extra:['cellphones','electronics','computing','home_appliances'], filtros:{ comissao_min:0, desconto_min:20 } },
-  { id:4, nome:'Casa & Família',  fontes:['GANHOS_EXTRAS'], categorias_extra:['home_decor','kitchen','baby','pets'], filtros:{ comissao_min:0, desconto_min:15 } },
-  { id:5, nome:'Esporte & Fitness', fontes:['GANHOS_EXTRAS'], categorias_extra:['sports','fitness'], filtros:{ comissao_min:0, desconto_min:30 } },
-  { id:6, nome:'Alto Desconto',   fontes:['GANHOS_EXTRAS'], categorias_extra:[], filtros:{ comissao_min:0, desconto_min:40 } },
-  { id:7, nome:'Mix Equilibrado', fontes:['GANHOS_EXTRAS'], categorias_extra:['fashion_women','fashion_men','electronics','home_decor','sports','beauty'], filtros:{ comissao_min:0, desconto_min:20 } },
+  {
+    id: 1,
+    nome: 'Top Comissão',
+    categorias_extra: [],
+    filtros: { comissao_min: 20, desconto_min: 15 },
+  },
+  {
+    id: 2,
+    nome: 'Moda & Beleza',
+    categorias_extra: ['MLB1430', 'MLB1246'],
+    filtros: { comissao_min: 0, desconto_min: 25 },
+  },
+  {
+    id: 3,
+    nome: 'Tech & Eletro',
+    categorias_extra: ['MLB1051', 'MLB1000', 'MLB1648', 'MLB5726'],
+    filtros: { comissao_min: 0, desconto_min: 20 },
+  },
+  {
+    id: 4,
+    nome: 'Casa & Família',
+    categorias_extra: ['MLB1574', 'MLB1071', 'MLB1384'],
+    filtros: { comissao_min: 0, desconto_min: 15 },
+  },
+  {
+    id: 5,
+    nome: 'Esporte & Saúde',
+    categorias_extra: ['MLB1276', 'MLB264586'],
+    filtros: { comissao_min: 0, desconto_min: 30 },
+  },
+  {
+    id: 6,
+    nome: 'Alto Desconto',
+    categorias_extra: [],
+    filtros: { comissao_min: 0, desconto_min: 40 },
+  },
+  {
+    id: 7,
+    nome: 'Mix Equilibrado',
+    categorias_extra: ['MLB1430', 'MLB1000', 'MLB1574', 'MLB1276', 'MLB1246'],
+    filtros: { comissao_min: 0, desconto_min: 20 },
+  },
 ];
 
 module.exports = { settings, FILTROS_GLOBAIS, PERFIS };

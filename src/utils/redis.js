@@ -1,82 +1,49 @@
-// src/utils/redis.js
-import Redis from 'ioredis';
-import { settings } from '../config/settings.js';
+const { createClient } = require('redis');
+const { settings } = require('../config/settings');
 
-let _client = null;
+let client = null;
 
-function getClient() {
-  if (!_client) {
-    _client = new Redis(settings.redisUrl, {
-      maxRetriesPerRequest: 3,
-      connectTimeout: 10000,
-      lazyConnect: true,
-    });
-
-    _client.on('error', (err) => {
-      console.error('[Redis] Erro de conexão:', err.message);
-    });
-  }
-  return _client;
+async function getClient() {
+  if (client && client.isOpen) return client;
+  client = createClient({ url: settings.REDIS_URL });
+  client.on('error', (e) => console.error('[Redis]', e.message));
+  await client.connect();
+  return client;
 }
 
-// ─── Cookies ────────────────────────────────────────────────────────────────
-
-export async function getCookie() {
-  const client = getClient();
-  const cookie = await client.get(settings.cookieKey);
-  if (!cookie) throw new Error(`Cookie "${settings.cookieKey}" não encontrado no Redis`);
-  return cookie;
+async function getCookie() {
+  const r = await getClient();
+  return await r.get('cookies-mercadolivre') || null;
 }
 
-export async function setCookie(cookieString) {
-  const client = getClient();
-  await client.set(settings.cookieKey, cookieString);
+async function setCookie(val) {
+  const r = await getClient();
+  await r.set('cookies-mercadolivre', val);
 }
 
-// ─── Deduplicação 24h ────────────────────────────────────────────────────────
-
-export async function jaPostado(mlbId) {
-  if (!mlbId) return false;
-  const client = getClient();
-  const key = `${settings.dedupePrefix}${mlbId}`;
-  const val = await client.get(key);
-  return val !== null;
+async function jaPostado(id) {
+  const r = await getClient();
+  return !!(await r.get(`ml:postado:${id}`));
 }
 
-export async function marcarPostado(mlbId) {
-  if (!mlbId) return;
-  const client = getClient();
-  const key = `${settings.dedupePrefix}${mlbId}`;
-  await client.set(key, '1', 'EX', settings.dedupeTTL);
+async function marcarPostado(id, ttlHoras) {
+  const r = await getClient();
+  await r.set(`ml:postado:${id}`, '1', { EX: ttlHoras * 3600 });
 }
 
-export async function marcarPostadoLote(mlbIds = []) {
-  if (!mlbIds.length) return;
-  const client = getClient();
-  const pipeline = client.pipeline();
-  for (const id of mlbIds) {
-    if (!id) continue;
-    const key = `${settings.dedupePrefix}${id}`;
-    pipeline.set(key, '1', 'EX', settings.dedupeTTL);
-  }
-  await pipeline.exec();
+// Rotação de perfis (0-6)
+async function getPerfilIndex() {
+  const r = await getClient();
+  const v = await r.get('ml:perfil_index');
+  return v !== null ? parseInt(v) : 0;
 }
 
-// ─── Status ──────────────────────────────────────────────────────────────────
-
-export async function pingRedis() {
-  try {
-    const client = getClient();
-    await client.ping();
-    return true;
-  } catch {
-    return false;
-  }
+async function avancarPerfilIndex(total) {
+  const r = await getClient();
+  const atual = await getPerfilIndex();
+  const proximo = (atual + 1) % total;
+  await r.set('ml:perfil_index', String(proximo));
+  return proximo;
 }
 
-export async function closeRedis() {
-  if (_client) {
-    await _client.quit();
-    _client = null;
-  }
-}
+module.exports = { getCookie, setCookie, jaPostado, marcarPostado, getPerfilIndex, avancarPerfilIndex };

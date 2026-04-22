@@ -1,17 +1,15 @@
 {
   "name": "ml-scraper-v2",
   "version": "2.0.0",
-  "description": "Coleta de produtos ML via Central de Afiliados + geração de links automática",
+  "description": "ML Scraper com 7 perfis rotativos e shortlink afiliado",
   "main": "server.js",
-  "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "axios": "^1.8.4",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "ioredis": "^5.3.2"
+    "axios": "^1.6.0",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "redis": "^4.6.0"
   }
 }

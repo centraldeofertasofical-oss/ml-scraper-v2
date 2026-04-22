@@ -1,60 +1,42 @@
-// src/routes/coletar.js
-import express from 'express';
-import { executarColeta, executarColetaRapida } from '../scrapers/orquestrador.js';
-import { logError, logInfo } from '../utils/logger.js';
-
+const express = require('express');
 const router = express.Router();
+const { executarColeta } = require('../scrapers/orquestrador');
+const { getCookie } = require('../utils/redis');
+const { PERFIS } = require('../config/settings');
+const { log } = require('../utils/logger');
 
-// POST /coletar — coleta completa (n8n chama isso)
-// Body opcional: { incluirCategorias: true, gerarAfiliado: true, marcarRedis: true }
-router.post('/', async (req, res) => {
-  try {
-    const {
-      incluirCategorias = true,
-      gerarAfiliado = true,
-      marcarRedis = true,
-    } = req.body || {};
-
-    logInfo('POST /coletar recebido', { incluirCategorias, gerarAfiliado, marcarRedis });
-
-    const resultado = await executarColeta({ incluirCategorias, gerarAfiliado, marcarRedis });
-    return res.status(200).json(resultado);
-
-  } catch (err) {
-    logError('Erro em POST /coletar', err?.message);
-    return res.status(500).json({ ok: false, error: err?.message });
-  }
-});
-
-// GET /coletar — alias GET para facilitar teste manual no browser
+// GET /coletar — coleta completa com perfil automático + afiliado
 router.get('/', async (req, res) => {
+  log(`GET /coletar recebido`);
   try {
-    const incluirCategorias = req.query.categorias !== 'false';
-    const gerarAfiliado = req.query.afiliado !== 'false';
-    const marcarRedis = req.query.redis !== 'false';
-    const dryRun = req.query.dry === 'true';
+    const dry = req.query.dry === 'true';
+    const semAfiliado = req.query.afiliado === 'false';
+    const perfilId = req.query.perfil ? parseInt(req.query.perfil) - 1 : null;
 
-    logInfo('GET /coletar recebido', { incluirCategorias, gerarAfiliado, marcarRedis, dryRun });
-
-    const resultado = await executarColeta({ incluirCategorias, gerarAfiliado, marcarRedis, dryRun });
-    return res.status(200).json(resultado);
-
-  } catch (err) {
-    logError('Erro em GET /coletar', err?.message);
-    return res.status(500).json({ ok: false, error: err?.message });
+    const resultado = await executarColeta({
+      gerarAfiliado: !semAfiliado,
+      dry,
+      perfilForçado: perfilId,
+    });
+    res.json(resultado);
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
   }
 });
 
-// GET /coletar/rapido — só ganhos extras, sem afiliado (teste rápido)
+// GET /coletar/rapido — sem afiliado, sem marcar Redis (teste rápido)
 router.get('/rapido', async (req, res) => {
+  log(`GET /coletar/rapido recebido`);
   try {
-    logInfo('GET /coletar/rapido recebido');
-    const resultado = await executarColetaRapida();
-    return res.status(200).json(resultado);
-  } catch (err) {
-    logError('Erro em GET /coletar/rapido', err?.message);
-    return res.status(500).json({ ok: false, error: err?.message });
+    const resultado = await executarColeta({
+      gerarAfiliado: false,
+      dry: true,
+      perfilForçado: 0,
+    });
+    res.json({ ...resultado, fonte: 'GANHOS_EXTRAS', modo: 'dry_sem_afiliado' });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
   }
 });
 
-export default router;
+module.exports = router;

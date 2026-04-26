@@ -42,7 +42,7 @@ function parseCookies(oldStr, setCookieArr) {
 }
 
 function extractCsrfFromCookie(cookieStr) {
-  const m = (cookieStr || '').match(/_csrf=([^;]+)/);
+  const m = String(cookieStr || '').match(/_csrf=([^;]+)/);
   return m ? decodeURIComponent(m[1]) : '';
 }
 

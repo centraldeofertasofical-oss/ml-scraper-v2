@@ -1,4 +1,6 @@
-// afiliado.js — Geração de shortlinks meli.la com cookie e CSRF dinâmicos
+/**
+ * afiliado.js — Geração de shortlinks meli.la com cookie e CSRF dinâmicos
+ */
 
 const axios = require('axios');
 const { settings } = require('../config/settings');
@@ -16,7 +18,7 @@ const LINKBUILDER_URL = 'https://www.mercadolivre.com.br/afiliados/linkbuilder';
 const CREATE_LINK_URL = 'https://www.mercadolivre.com.br/affiliate-program/api/v2/affiliates/createLink';
 
 function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function normalizarUrlMercadoLivre(url) {
@@ -38,7 +40,7 @@ function normalizarUrlMercadoLivre(url) {
 
     if (!hostValido) return '';
 
-    if (parsed.hostname.includes('click1.mercadolivre.com.br')) return '';
+    if (parsed.hostname === 'click1.mercadolivre.com.br') return '';
     if (parsed.pathname.includes('/mclics/clicks/external/')) return '';
 
     parsed.hash = '';
@@ -55,16 +57,17 @@ function filtrarUrlsValidas(urls) {
   const invalidas = [];
 
   for (const raw of urls || []) {
-    const url = normalizarUrlMercadoLivre(raw);
+    const normalizada = normalizarUrlMercadoLivre(raw);
 
-    if (!url) {
+    if (!normalizada) {
       invalidas.push(raw);
       continue;
     }
 
-    if (seen.has(url)) continue;
-    seen.add(url);
-    validas.push(url);
+    if (seen.has(normalizada)) continue;
+
+    seen.add(normalizada);
+    validas.push(normalizada);
   }
 
   return { validas, invalidas };
@@ -74,14 +77,14 @@ async function atualizarCookiesECsrf(cookieAtual) {
   try {
     const res = await axios.get(LINKBUILDER_URL, {
       headers: {
-        cookie: cookieAtual,
+        'cookie': cookieAtual,
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       },
       maxRedirects: 5,
       timeout: 20000,
-      validateStatus: s => s >= 200 && s < 400,
+      validateStatus: status => status >= 200 && status < 400,
     });
 
     const setCookieArr = res.headers['set-cookie'] || [];
@@ -124,24 +127,32 @@ async function gerarLinksAfiliado(urls, cookieAtual, csrfAtual) {
     err('[CSRF] Token CSRF vazio antes do createLink');
   }
 
-  try {
-    const body = {
-      urls: urlsValidas,
-      tag: settings.AFILIADO_TAG,
-    };
+  const body = {
+    urls: urlsValidas,
+    tag: settings.AFILIADO_TAG,
+  };
 
-    const { data } = await axios.post(
+  try {
+    const { data, status } = await axios.post(
       CREATE_LINK_URL,
       body,
       {
         headers: buildHeaders(cookieAtual, csrf),
         timeout: 25000,
-        validateStatus: s => s >= 200 && s < 500,
+        validateStatus: status => status >= 200 && status < 500,
       }
     );
 
+    if (status < 200 || status >= 300) {
+      err(`[AFILIADO] createLink retornou HTTP ${status} — ${JSON.stringify(data || {})}`);
+      err(`[AFILIADO] Debug lote | urls=${urlsValidas.length} | csrf=${maskToken(csrf)} | cookie=${cookieAtual ? 'sim' : 'não'}`);
+      err(`[AFILIADO] URLs lote: ${JSON.stringify(urlsValidas.slice(0, 5))}`);
+      return {};
+    }
+
     if (!data || !Array.isArray(data.urls)) {
       err(`[AFILIADO] Retorno inesperado createLink | body=${JSON.stringify(data || {})}`);
+      err(`[AFILIADO] Debug lote | urls=${urlsValidas.length} | csrf=${maskToken(csrf)} | cookie=${cookieAtual ? 'sim' : 'não'}`);
       return {};
     }
 
@@ -161,9 +172,9 @@ async function gerarLinksAfiliado(urls, cookieAtual, csrfAtual) {
     return mapa;
   } catch (e) {
     const status = e.response?.status;
-    const body = JSON.stringify(e.response?.data || {});
+    const bodyErro = JSON.stringify(e.response?.data || {});
 
-    err(`[AFILIADO] Erro createLink: HTTP ${status} — ${body} — ${e.message}`);
+    err(`[AFILIADO] Erro createLink: HTTP ${status} — ${bodyErro} — ${e.message}`);
     err(`[AFILIADO] Debug lote | urls=${urlsValidas.length} | csrf=${maskToken(csrf)} | cookie=${cookieAtual ? 'sim' : 'não'}`);
     err(`[AFILIADO] URLs lote: ${JSON.stringify(urlsValidas.slice(0, 5))}`);
 

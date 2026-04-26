@@ -1,4 +1,6 @@
-// headers.js — Utilitários de cookie, CSRF e headers
+/**
+ * headers.js — Utilitários de cookie, CSRF e headers
+ */
 
 function buildHeaders(cookie, csrfToken) {
   return {
@@ -34,7 +36,9 @@ function parseCookies(oldStr, setCookieArr) {
     if (k) map[k.trim()] = v.join('=');
   });
 
-  return Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ');
+  return Object.entries(map)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
 }
 
 function extractCsrfFromCookie(cookieStr) {
@@ -43,17 +47,17 @@ function extractCsrfFromCookie(cookieStr) {
 }
 
 function extractCsrfFromHtml(html) {
-  const htmlStr = String(html || '');
+  const s = String(html || '');
 
   const meta =
-    htmlStr.match(/<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i) ||
-    htmlStr.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']csrf-token["']/i);
+    s.match(/<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']/i) ||
+    s.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']csrf-token["']/i);
 
   if (meta?.[1]) return meta[1];
 
   const ctx =
-    htmlStr.match(/"csrfToken"\s*:\s*"([^"]+)"/) ||
-    htmlStr.match(/csrfToken["']?\s*[:=]\s*["']([^"']+)["']/);
+    s.match(/"csrfToken"\s*:\s*"([^"]+)"/) ||
+    s.match(/csrfToken["']?\s*[:=]\s*["']([^"']+)["']/);
 
   if (ctx?.[1]) return ctx[1];
 

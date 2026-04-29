@@ -1,6 +1,10 @@
 /**
- * hub.js — Coleta do Hub ML (Ganhos Extras + Categorias)
- * + Integração Pelando para priorizar categorias em alta nos grupos de achadinhos
+ * hub.js — Coleta do Hub ML
+ * Fontes:
+ * 1. Ganhos Extras
+ * 2. Categorias
+ * 3. Keywords por intenção de comprador
+ * 4. Tendências Pelando para priorização
  */
 
 const axios = require('axios');
@@ -27,16 +31,60 @@ const CATEGORIA_IDS = {
 };
 
 const KEYWORDS_CATEGORIA = {
-  'MLB1430': ['tênis', 'tenis', 'sapato', 'bota', 'botina', 'calça', 'calca', 'jeans', 'camiseta', 'camisa', 'mochila', 'bolsa', 'roupa', 'vestuário', 'kit roupa', 'conjunto'],
-  'MLB1246': ['perfume', 'desodorante', 'shampoo', 'condicionador', 'creme', 'hidratante', 'maquiagem', 'batom', 'base', 'secador', 'prancha', 'chapinha', 'escova'],
-  'MLB1051': ['celular', 'smartphone', 'iphone', 'samsung', 'motorola', 'xiaomi', 'redmi', 'poco'],
-  'MLB1000': ['smart tv', 'smarttv', 'televisão', 'televisao', 'monitor', 'headphone', 'fone', 'caixa de som', 'bluetooth', 'soundbar'],
-  'MLB1648': ['notebook', 'pc', 'computador', 'ssd', 'memória', 'memoria', 'teclado', 'mouse', 'webcam', 'hd externo'],
-  'MLB5726': ['geladeira', 'fogão', 'fogao', 'microondas', 'lavadora', 'máquina de lavar', 'ventilador', 'ar condicionado', 'purificador', 'fritadeira', 'airfryer'],
-  'MLB1574': ['cadeira', 'mesa', 'sofá', 'sofa', 'tapete', 'organização', 'organizacao', 'panela', 'cozinha', 'utensílio', 'utensilios', 'jogo de cama', 'edredom'],
-  'MLB1276': ['bicicleta', 'ergométrica', 'ergometrica', 'esteira', 'haltere', 'academia', 'suplemento', 'proteína', 'proteina', 'whey', 'creatina'],
-  'MLB264586': ['termômetro', 'termometro', 'oxímetro', 'oximetro', 'medidor', 'pressão', 'pressao', 'vitamina'],
-  'MLB1071': ['ração', 'racao', 'pet', 'cachorro', 'gato', 'coleira', 'casinha'],
+  'MLB1430': [
+    'tênis', 'tenis', 'sapato', 'bota', 'botina', 'calça', 'calca',
+    'jeans', 'camiseta', 'camisa', 'mochila', 'bolsa', 'roupa',
+    'vestuário', 'kit roupa', 'conjunto', 'cueca', 'meia', 'sandalia',
+    'sandália', 'chinelo', 'vestido', 'cropped',
+  ],
+  'MLB1246': [
+    'perfume', 'desodorante', 'shampoo', 'condicionador', 'creme',
+    'hidratante', 'maquiagem', 'batom', 'base', 'secador', 'prancha',
+    'chapinha', 'escova', 'skincare', 'barbeador',
+  ],
+  'MLB1051': [
+    'celular', 'smartphone', 'iphone', 'samsung', 'motorola', 'xiaomi',
+    'redmi', 'poco', 'capinha', 'pelicula', 'película', 'carregador',
+  ],
+  'MLB1000': [
+    'smart tv', 'smarttv', 'televisão', 'televisao', 'monitor',
+    'headphone', 'fone', 'caixa de som', 'bluetooth', 'soundbar',
+    'smartwatch', 'power bank',
+  ],
+  'MLB1648': [
+    'notebook', 'pc', 'computador', 'ssd', 'memória', 'memoria',
+    'teclado', 'mouse', 'webcam', 'hd externo',
+  ],
+  'MLB5726': [
+    'geladeira', 'fogão', 'fogao', 'microondas', 'lavadora',
+    'máquina de lavar', 'ventilador', 'ar condicionado', 'purificador',
+    'fritadeira', 'airfryer', 'air fryer',
+  ],
+  'MLB1574': [
+    'cadeira', 'mesa', 'sofá', 'sofa', 'tapete', 'organização',
+    'organizacao', 'panela', 'cozinha', 'utensílio', 'utensilios',
+    'jogo de cama', 'edredom', 'organizador', 'pote', 'garrafa térmica',
+  ],
+  'MLB1276': [
+    'bicicleta', 'ergométrica', 'ergometrica', 'esteira', 'haltere',
+    'academia', 'suplemento', 'proteína', 'proteina', 'whey', 'creatina',
+    'dry fit', 'fitness', 'corda', 'tapete yoga',
+  ],
+  'MLB264586': [
+    'termômetro', 'termometro', 'oxímetro', 'oximetro', 'medidor',
+    'pressão', 'pressao', 'vitamina',
+  ],
+  'MLB1071': [
+    'ração', 'racao', 'pet', 'cachorro', 'gato', 'coleira', 'casinha',
+  ],
+  'MLB263532': [
+    'furadeira', 'parafusadeira', 'ferramenta', 'trena', 'chave',
+    'multimetro', 'compressor',
+  ],
+  'MLB5672': [
+    'carro', 'automotivo', 'pneu', 'calibrador', 'aspirador carro',
+    'suporte celular carro', 'capa banco',
+  ],
 };
 
 const PICTURE_TEMPLATE = 'https://http2.mlstatic.com/D_Q_NP_2X_{id}-O.webp';
@@ -56,9 +104,9 @@ async function buscarTendenciasPelando() {
           }),
         },
         headers: {
-          'accept': 'application/json',
+          accept: 'application/json',
           'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'referer': 'https://www.pelando.com.br/',
+          referer: 'https://www.pelando.com.br/',
         },
         timeout: 10000,
       }
@@ -125,14 +173,48 @@ async function getCategoriasPriorizadas(categoriasPadrao) {
 }
 
 async function coletarGanhosExtras(cookie, limite) {
-  return coletarHub(cookie, limite, [{ id: 'extra_commission', value: true }], 'GANHOS_EXTRAS');
+  return coletarHub(cookie, limite, {
+    search: '',
+    sort: 'relevance',
+    filters: [{ id: 'extra_commission', value: true }],
+    origem: 'GANHOS_EXTRAS',
+  });
 }
 
 async function coletarCategoria(cookie, categoriaId, limite) {
-  return coletarHub(cookie, limite, [{ id: 'category', value: categoriaId }], `CAT_${categoriaId}`);
+  return coletarHub(cookie, limite, {
+    search: '',
+    sort: 'relevance',
+    filters: [{ id: 'category', value: categoriaId }],
+    origem: `CAT_${categoriaId}`,
+  });
 }
 
-async function coletarHub(cookie, limite, filters, origem) {
+async function coletarKeyword(cookie, keyword, limite, categoriaId = null) {
+  const filters = [];
+
+  if (categoriaId) {
+    filters.push({ id: 'category', value: categoriaId });
+  }
+
+  return coletarHub(cookie, limite, {
+    search: keyword,
+    sort: 'relevance',
+    filters,
+    origem: `KEYWORD_${normalizarOrigemKeyword(keyword)}`,
+    keyword,
+  });
+}
+
+async function coletarHub(cookie, limite, config) {
+  const {
+    search = '',
+    sort = 'relevance',
+    filters = [],
+    origem = 'HUB',
+    keyword = null,
+  } = config || {};
+
   const produtos = [];
   let offset = 0;
   let pagina = 1;
@@ -142,16 +224,16 @@ async function coletarHub(cookie, limite, filters, origem) {
     try {
       const { data } = await axios.post(
         `${HUB_URL}?is_affiliate=true&device=desktop`,
-        { search: '', sort: 'relevance', filters, offset },
+        { search, sort, filters, offset },
         {
           headers: {
-            'accept': 'application/json, text/plain, */*',
+            accept: 'application/json, text/plain, */*',
             'accept-language': 'pt-BR,pt;q=0.9',
             'content-type': 'application/json',
-            'origin': 'https://www.mercadolivre.com.br',
-            'referer': 'https://www.mercadolivre.com.br/afiliados/hub?is_affiliate=true',
+            origin: 'https://www.mercadolivre.com.br',
+            referer: 'https://www.mercadolivre.com.br/afiliados/hub?is_affiliate=true',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-            'cookie': cookie,
+            cookie,
           },
           timeout: 20000,
         }
@@ -165,10 +247,15 @@ async function coletarHub(cookie, limite, filters, origem) {
       }
 
       const ctx = data?.polycard_client_model?.polycard_context;
-      const parsed = polycards.map(card => parsePolycard(card, origem, ctx)).filter(Boolean);
+      const parsed = polycards
+        .map(card => parsePolycard(card, origem, ctx, keyword))
+        .filter(Boolean);
 
       produtos.push(...parsed);
-      log(`[${origem}] Pág ${pagina} → offset ${offset} → ${polycards.length} brutos / ${parsed.length} parsed (total: ${produtos.length})`);
+
+      log(
+        `[${origem}] Pág ${pagina} → offset ${offset} → ${polycards.length} brutos / ${parsed.length} parsed (total: ${produtos.length})`
+      );
 
       if (produtos.length >= limite) break;
 
@@ -227,7 +314,7 @@ function construirLinkOriginalHub(meta) {
   return '';
 }
 
-function parsePolycard(card, origem, context) {
+function parsePolycard(card, origem, context, keyword = null) {
   try {
     if (!card || !card.metadata) return null;
 
@@ -260,8 +347,8 @@ function parsePolycard(card, origem, context) {
       compByType[c.id || c.type] = c;
     }
 
-    const titulo = compByType['title']?.title?.text || '';
-    const priceComp = compByType['price']?.price || {};
+    const titulo = compByType.title?.title?.text || '';
+    const priceComp = compByType.price?.price || {};
 
     const precoPor = parseFloat(priceComp?.current_price?.value || 0) || null;
     const precoDe = parseFloat(priceComp?.previous_price?.value || 0) || null;
@@ -273,13 +360,13 @@ function parsePolycard(card, origem, context) {
       desconto = parseInt(discLabel.match(/(\d+)%/)?.[1] || '0') || null;
     }
 
-    const chipComp = compByType['affiliates_commission_chip']?.chip;
+    const chipComp = compByType.affiliates_commission_chip?.chip;
     const comissaoStr = chipComp?.label?.text || '';
     const comissaoMatch = comissaoStr.match(/(\d+(?:[.,]\d+)?)\s*%/);
     const comissao = comissaoMatch ? parseFloat(comissaoMatch[1].replace(',', '.')) : 0;
 
     const temGanhoExtra = meta.extra_commission === 'true' || meta.extra_commission === true;
-    const destaque = compByType['highlight']?.highlight?.text || null;
+    const destaque = compByType.highlight?.highlight?.text || null;
 
     if (!titulo || !linkOriginal) return null;
 
@@ -288,6 +375,7 @@ function parsePolycard(card, origem, context) {
       PLATAFORMA: 'Mercado Livre',
       ORIGEM: origem,
       FONTE: 'HUB',
+      KEYWORD_BUSCA: keyword || null,
       PRODUTO: titulo,
       LINK_ORIGINAL: linkOriginal,
       LINK_AFILIADO: null,
@@ -308,6 +396,16 @@ function parsePolycard(card, origem, context) {
   }
 }
 
+function normalizarOrigemKeyword(keyword) {
+  return String(keyword || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 60);
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -315,6 +413,7 @@ function sleep(ms) {
 module.exports = {
   coletarGanhosExtras,
   coletarCategoria,
+  coletarKeyword,
   getCategoriasPriorizadas,
   buscarTendenciasPelando,
   CATEGORIA_IDS,

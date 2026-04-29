@@ -1,20 +1,14 @@
 /**
- * orquestrador.js — Coleta completa integrada
+ * orquestrador.js — ML Scraper V4
  *
- * Fontes:
- *   1. Hub ML — Keywords por intenção de comprador
- *   2. Hub ML — Ganhos Extras
- *   3. Hub ML — Categorias de apoio
- *   4. Ofertas Relâmpago
- *   5. Ofertas do Dia
- *
- * Ajuste aplicado:
- *   - Keywords aumentadas para 75% da coleta.
- *   - Categorias reduzidas para 10%.
- *   - Ofertas mantidas em 10%.
- *   - Ganhos Extras ficam com o restante.
- *   - Busca por keyword mais precisa, sem multiplicar demais o volume bruto.
- *   - Mantém afiliado, Redis, filtros e variedade por família.
+ * Melhorias V4:
+ * - Keywords são a fonte principal.
+ * - Aprendizado automático por keyword no Redis.
+ * - Keywords com melhor histórico sobem na prioridade.
+ * - Categorias ficam só como apoio.
+ * - Bloqueio temporário por família de produto.
+ * - Filtro contra produtos 110V/127V puro.
+ * - Mantém geração de afiliado, Redis, dedupe e score.
  */
 
 const {
@@ -38,15 +32,20 @@ const {
   getCookie,
   jaPostado,
   marcarPostado,
+  jaPostouFamilia,
+  marcarFamiliaPostada,
   getPerfilIndex,
   avancarPerfilIndex,
   getScoreCategoria,
   atualizarScoreCategoria,
+  getScoreKeyword,
+  atualizarScoreKeyword,
+  getTodosScoresKeywords,
 } = require('../utils/redis');
 
 const { log, err } = require('../utils/logger');
 
-function calcularScore(produto, scoresCategorias) {
+function calcularScore(produto, scoresCategorias = {}, scoresKeywords = {}) {
   let score = 0;
 
   score += (produto.DESCONTO_PCT || 0) * 1;
@@ -54,7 +53,9 @@ function calcularScore(produto, scoresCategorias) {
 
   if (produto.GANHO_EXTRA) score += 30;
   if (produto.FONTE === 'OFERTAS') score += 15;
-  if (produto.ORIGEM && String(produto.ORIGEM).startsWith('KEYWORD_')) score += 30;
+
+  if (produto.ORIGEM && String(produto.ORIGEM).startsWith('KEYWORD_')) score += 35;
+  if (produto.KEYWORD_BUSCA) score += 15;
 
   if (produto.DESTAQUE === 'MAIS VENDIDO') score += 25;
   if (produto.DESTAQUE === 'OFERTA DO DIA') score += 20;
@@ -66,6 +67,12 @@ function calcularScore(produto, scoresCategorias) {
 
   const catScore = scoresCategorias[produto.ORIGEM] || 0;
   score += catScore * 0.5;
+
+  if (produto.KEYWORD_BUSCA) {
+    const kwKey = normalizarKeywordScoreKey(produto.KEYWORD_BUSCA);
+    const kwScore = scoresKeywords[kwKey] || 0;
+    score += kwScore * 0.25;
+  }
 
   return score;
 }
@@ -104,16 +111,17 @@ async function executarColeta(opcoes = {}) {
   const temKeywords = keywordsPerfil.length > 0;
   const temCatsExtra = perfil.categorias_extra.length > 0;
 
-  const limiteKeyword = temKeywords ? Math.floor(limite * 0.75) : 0;
-  const limiteCat = temCatsExtra ? Math.floor(limite * 0.10) : 0;
-  const limiteOfertas = incluirOfertas ? Math.floor(limite * 0.10) : 0;
+  const limiteKeyword = temKeywords ? Math.floor(limite * 0.78) : 0;
+  const limiteCat = temCatsExtra ? Math.floor(limite * 0.05) : 0;
+  const limiteOfertas = incluirOfertas ? Math.floor(limite * 0.07) : 0;
   const limiteGE = Math.max(0, limite - limiteKeyword - limiteCat - limiteOfertas);
 
   log(
-    `[LIMITES] Keywords:${limiteKeyword} | GE:${limiteGE} | Categorias:${limiteCat} | Ofertas:${limiteOfertas} | Total:${limite}`
+    `[LIMITES V4] Keywords:${limiteKeyword} | GE:${limiteGE} | Categorias:${limiteCat} | Ofertas:${limiteOfertas} | Total:${limite}`
   );
 
   const scoresCategorias = {};
+  let scoresKeywords = {};
 
   try {
     for (const cat of perfil.categorias_extra) {
@@ -123,19 +131,23 @@ async function executarColeta(opcoes = {}) {
     scoresCategorias.OFERTA_LIGHTNING = await getScoreCategoria('OFERTA_LIGHTNING');
     scoresCategorias.OFERTA_DEAL_OF_THE_DAY = await getScoreCategoria('OFERTA_DEAL_OF_THE_DAY');
 
-    log('[SCORE] Scores históricos carregados:', JSON.stringify(scoresCategorias));
+    scoresKeywords = await getTodosScoresKeywords();
+
+    log('[SCORE] Scores categorias carregados:', JSON.stringify(scoresCategorias));
+    log('[SCORE] Scores keywords carregados:', JSON.stringify(scoresKeywords));
   } catch (e) {
     err('[SCORE] Erro ao carregar scores:', e.message);
   }
 
   let brutos = [];
 
-  // 1. Busca por intenção de comprador — agora é a fonte principal
+  // 1. Keywords — fonte principal V4
   if (temKeywords && limiteKeyword > 0) {
-    const keywordsRodada = selecionarKeywordsRodada(keywordsPerfil, 12);
+    const keywordsRodada = selecionarKeywordsRodadaV4(keywordsPerfil, scoresKeywords, 14);
     const porKeyword = Math.max(5, Math.ceil(limiteKeyword / keywordsRodada.length));
 
-    log(`[KEYWORDS] Buscando ${keywordsRodada.length} keywords | limite por keyword: ${porKeyword}`);
+    log(`[KEYWORDS V4] Buscando ${keywordsRodada.length} keywords | limite por keyword: ${porKeyword}`);
+    log(`[KEYWORDS V4] Rodada: ${keywordsRodada.join(' | ')}`);
 
     for (const kw of keywordsRodada) {
       try {
@@ -149,7 +161,7 @@ async function executarColeta(opcoes = {}) {
     }
   }
 
-  // 2. Ganhos Extras — apoio para comissão alta, sem dominar a busca
+  // 2. Ganhos Extras — apoio
   if (limiteGE > 0) {
     log(`[COLETA] Buscando Ganhos Extras (limite bruto: ${limiteGE})...`);
 
@@ -162,7 +174,7 @@ async function executarColeta(opcoes = {}) {
     }
   }
 
-  // 3. Categorias — agora só apoio, para não trazer produto aleatório demais
+  // 3. Categorias — apoio mínimo
   if (temCatsExtra && limiteCat > 0) {
     let categoriasOrdenadas = perfil.categorias_extra;
 
@@ -173,7 +185,7 @@ async function executarColeta(opcoes = {}) {
       err('[TENDENCIAS] Falha ao priorizar — usando ordem padrão:', e.message);
     }
 
-    const porCat = Math.max(3, Math.ceil(limiteCat / categoriasOrdenadas.length));
+    const porCat = Math.max(2, Math.ceil(limiteCat / categoriasOrdenadas.length));
 
     for (const cat of categoriasOrdenadas) {
       try {
@@ -187,7 +199,7 @@ async function executarColeta(opcoes = {}) {
     }
   }
 
-  // 4. Ofertas Relâmpago e Ofertas do Dia
+  // 4. Ofertas
   if (incluirOfertas && limiteOfertas > 0) {
     try {
       log('[COLETA] Buscando Ofertas Relâmpago e Ofertas do Dia...');
@@ -215,8 +227,6 @@ async function executarColeta(opcoes = {}) {
   log(`[FILTRO] Total brutos: ${totalBrutos}`);
 
   if (totalBrutos === 0) {
-    log('[AVISO] Nenhum produto coletado — verifique cookie e logs');
-
     return {
       ok: true,
       perfil: { id: perfil.id, nome: perfil.nome },
@@ -271,7 +281,7 @@ async function executarColeta(opcoes = {}) {
 
   validos = validos.filter(p => aplicarFiltrosGlobais(p));
 
-  log(`[FILTRO] Após filtros globais: ${validos.length}`);
+  log(`[FILTRO] Após filtros globais + voltagem: ${validos.length}`);
 
   validos = validos.filter(p => aplicarFiltrosPerfil(p, perfil.filtros));
 
@@ -285,19 +295,31 @@ async function executarColeta(opcoes = {}) {
 
   const aposVariedade = validos.length;
 
-  log(`[VARIEDADE] Após limite por família: ${aposVariedade}`);
+  log(`[VARIEDADE] Após limite por família na rodada: ${aposVariedade}`);
 
   let aposRedis = validos;
 
   if (!dry) {
-    const checks = await Promise.all(validos.map(p => jaPostado(p.ID)));
-    aposRedis = validos.filter((_, i) => !checks[i]);
-    log(`[REDIS] Bloqueados: ${validos.length - aposRedis.length} | Disponíveis: ${aposRedis.length}`);
+    const checksProduto = await Promise.all(validos.map(p => jaPostado(p.ID)));
+
+    aposRedis = validos.filter((p, i) => {
+      if (checksProduto[i]) return false;
+      return true;
+    });
+
+    const antesFamilia = aposRedis.length;
+
+    aposRedis = await filtrarFamiliasRecentes(aposRedis, {
+      maxPermitidosFamiliaRecente: 1,
+    });
+
+    log(`[REDIS] Bloqueados por produto: ${validos.length - aposRedis.length}`);
+    log(`[REDIS] Filtro família recente aplicado: ${antesFamilia} → ${aposRedis.length}`);
   }
 
-  aposRedis.sort((a, b) => calcularScore(b, scoresCategorias) - calcularScore(a, scoresCategorias));
+  aposRedis.sort((a, b) => calcularScore(b, scoresCategorias, scoresKeywords) - calcularScore(a, scoresCategorias, scoresKeywords));
 
-  log('[SCORE] Produtos ordenados por relevância');
+  log('[SCORE] Produtos ordenados por relevância V4');
 
   const finaisSemAfiliado = aposRedis.slice(0, limite);
 
@@ -312,7 +334,6 @@ async function executarColeta(opcoes = {}) {
     const processados = await processarLoteAfiliado(finaisSemAfiliado);
 
     const produtosComAfiliado = processados.filter(linkAfiliadoValido);
-
     produtosSemAfiliado = processados.filter(p => !linkAfiliadoValido(p));
 
     log(`[AFILIADO] ${produtosComAfiliado.length}/${processados.length} shortlinks gerados`);
@@ -326,31 +347,17 @@ async function executarColeta(opcoes = {}) {
 
   if (!dry && finais.length > 0) {
     await Promise.all(finais.map(p => marcarPostado(p.ID, settings.DEDUPE_TTL_HORAS)));
-    log(`[REDIS] ${finais.length} produtos com afiliado marcados (TTL: ${settings.DEDUPE_TTL_HORAS}h)`);
+
+    const familias = [...new Set(finais.map(p => p.FAMILIA_OFERTA).filter(Boolean))];
+
+    await Promise.all(familias.map(f => marcarFamiliaPostada(f, 6)));
+
+    log(`[REDIS] ${finais.length} produtos marcados (TTL produto: ${settings.DEDUPE_TTL_HORAS}h)`);
+    log(`[REDIS] Famílias marcadas por 6h: ${familias.join(', ')}`);
   }
 
   if (!dry) {
-    try {
-      const scoresPorCat = {};
-
-      for (const p of finais) {
-        if (!p.ORIGEM) continue;
-
-        const catKey = p.ORIGEM.startsWith('CAT_')
-          ? p.ORIGEM.replace('CAT_', '')
-          : p.ORIGEM;
-
-        scoresPorCat[catKey] = (scoresPorCat[catKey] || 0) + calcularScore(p, scoresCategorias);
-      }
-
-      for (const [cat, s] of Object.entries(scoresPorCat)) {
-        await atualizarScoreCategoria(cat, s);
-      }
-
-      log('[SCORE] Scores atualizados:', JSON.stringify(scoresPorCat));
-    } catch (e) {
-      err('[SCORE] Erro ao atualizar scores:', e.message);
-    }
+    await atualizarAprendizadoV4(finais, scoresCategorias, scoresKeywords);
   }
 
   return {
@@ -388,6 +395,8 @@ function aplicarFiltrosGlobais(p) {
     return false;
   }
 
+  if (!produtoVoltagemValida(p)) return false;
+
   return true;
 }
 
@@ -412,22 +421,64 @@ function aplicarFiltrosPerfil(p, filtros) {
   return true;
 }
 
-function selecionarKeywordsRodada(keywords, limite = 12) {
+function produtoVoltagemValida(p) {
+  const nome = normalizarTexto(p.PRODUTO || '');
+
+  const temBivolt =
+    nome.includes('bivolt') ||
+    nome.includes('127 220') ||
+    nome.includes('110 220') ||
+    nome.includes('127v 220v') ||
+    nome.includes('110v 220v') ||
+    nome.includes('127 220v') ||
+    nome.includes('110 220v');
+
+  if (temBivolt) return true;
+
+  const tem220 = /\b220\s*v\b/.test(nome);
+  if (tem220) return true;
+
+  const tem110ou127 =
+    /\b110\s*v\b/.test(nome) ||
+    /\b127\s*v\b/.test(nome);
+
+  if (tem110ou127) return false;
+
+  return true;
+}
+
+function selecionarKeywordsRodadaV4(keywords, scoresKeywords, limite = 14) {
   const lista = [...new Set(keywords || [])];
 
   if (lista.length <= limite) return lista;
 
+  const comScore = lista.map(kw => {
+    const key = normalizarKeywordScoreKey(kw);
+    return {
+      kw,
+      score: scoresKeywords[key] || 0,
+    };
+  });
+
+  const topAprendidas = comScore
+    .filter(i => i.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(i => i.kw);
+
+  const restantes = lista.filter(kw => !topAprendidas.includes(kw));
+
   const agora = new Date();
   const dia = agora.getDate();
   const hora = agora.getHours();
-  const inicio = (dia + hora) % lista.length;
+  const inicio = restantes.length ? (dia + hora) % restantes.length : 0;
 
   const rotacionadas = [
-    ...lista.slice(inicio),
-    ...lista.slice(0, inicio),
+    ...restantes.slice(inicio),
+    ...restantes.slice(0, inicio),
   ];
 
-  return rotacionadas.slice(0, limite);
+  return [...topAprendidas, ...rotacionadas].slice(0, limite);
 }
 
 function aplicarVariedadePorFamilia(produtos, opcoes = {}) {
@@ -451,6 +502,69 @@ function aplicarVariedadePorFamilia(produtos, opcoes = {}) {
   return resultado;
 }
 
+async function filtrarFamiliasRecentes(produtos, opcoes = {}) {
+  const maxPermitidosFamiliaRecente = opcoes.maxPermitidosFamiliaRecente || 1;
+  const contadorFamiliaRecente = {};
+  const resultado = [];
+
+  for (const p of produtos) {
+    const familia = p.FAMILIA_OFERTA || detectarFamiliaProduto(p.PRODUTO || '');
+    p.FAMILIA_OFERTA = familia;
+
+    const recente = await jaPostouFamilia(familia);
+
+    if (!recente) {
+      resultado.push(p);
+      continue;
+    }
+
+    contadorFamiliaRecente[familia] = contadorFamiliaRecente[familia] || 0;
+
+    if (contadorFamiliaRecente[familia] < maxPermitidosFamiliaRecente) {
+      contadorFamiliaRecente[familia]++;
+      resultado.push(p);
+    }
+  }
+
+  return resultado;
+}
+
+async function atualizarAprendizadoV4(finais, scoresCategorias, scoresKeywords) {
+  try {
+    const scoresPorCat = {};
+    const scoresPorKeyword = {};
+
+    for (const p of finais) {
+      const scoreProduto = calcularScore(p, scoresCategorias, scoresKeywords);
+
+      if (p.ORIGEM) {
+        const catKey = p.ORIGEM.startsWith('CAT_')
+          ? p.ORIGEM.replace('CAT_', '')
+          : p.ORIGEM;
+
+        scoresPorCat[catKey] = (scoresPorCat[catKey] || 0) + scoreProduto;
+      }
+
+      if (p.KEYWORD_BUSCA) {
+        scoresPorKeyword[p.KEYWORD_BUSCA] = (scoresPorKeyword[p.KEYWORD_BUSCA] || 0) + scoreProduto;
+      }
+    }
+
+    for (const [cat, s] of Object.entries(scoresPorCat)) {
+      await atualizarScoreCategoria(cat, s);
+    }
+
+    for (const [kw, s] of Object.entries(scoresPorKeyword)) {
+      await atualizarScoreKeyword(kw, s);
+    }
+
+    log('[SCORE V4] Categorias atualizadas:', JSON.stringify(scoresPorCat));
+    log('[SCORE V4] Keywords atualizadas:', JSON.stringify(scoresPorKeyword));
+  } catch (e) {
+    err('[SCORE V4] Erro ao atualizar aprendizado:', e.message);
+  }
+}
+
 function detectarFamiliaProduto(texto) {
   const t = normalizarTexto(texto);
 
@@ -465,18 +579,19 @@ function detectarFamiliaProduto(texto) {
     { familia: 'bolsa_mochila', termos: ['bolsa', 'mochila', 'carteira'] },
     { familia: 'fitness', termos: ['academia', 'fitness', 'dry fit', 'legging', 'short academia'] },
     { familia: 'suplemento', termos: ['creatina', 'whey', 'pre treino', 'pré treino', 'suplemento'] },
-    { familia: 'fone', termos: ['fone', 'headphone', 'bluetooth'] },
+    { familia: 'fone', termos: ['fone', 'headphone', 'bluetooth', 'caixa de som'] },
     { familia: 'smartwatch', termos: ['smartwatch', 'relogio inteligente', 'relógio inteligente'] },
     { familia: 'organizador', termos: ['organizador', 'organizacao', 'organização'] },
     { familia: 'tapete', termos: ['tapete'] },
     { familia: 'garrafa_copo', termos: ['garrafa', 'copo termico', 'copo térmico', 'squeeze', 'cuia'] },
-    { familia: 'cozinha', termos: ['cozinha', 'panela', 'pote', 'escorredor', 'air fryer', 'fritadeira', 'torradeira', 'sanduicheira', 'processador'] },
+    { familia: 'cozinha', termos: ['cozinha', 'panela', 'pote', 'escorredor', 'air fryer', 'fritadeira', 'torradeira', 'sanduicheira', 'processador', 'chaleira', 'espremedor'] },
     { familia: 'cama_banho', termos: ['jogo de cama', 'edredom', 'coberdrom', 'coberta', 'toalha', 'banheiro', 'lencol', 'lençol'] },
     { familia: 'beleza', termos: ['perfume', 'body splash', 'shampoo', 'hidratante', 'maquiagem', 'skincare'] },
     { familia: 'cabelo', termos: ['secador', 'chapinha', 'escova secadora', 'prancha'] },
-    { familia: 'ferramenta', termos: ['furadeira', 'parafusadeira', 'ferramenta', 'trena', 'esmerilhadeira'] },
+    { familia: 'ferramenta', termos: ['furadeira', 'parafusadeira', 'ferramenta', 'trena', 'esmerilhadeira', 'solda'] },
     { familia: 'auto', termos: ['carro', 'automotivo', 'pneu', 'calibrador'] },
-    { familia: 'eletro_220v', termos: ['220v', '127/220v', 'bivolt'] },
+    { familia: 'ventilador', termos: ['ventilador'] },
+    { familia: 'eletro_220v', termos: ['220v', '127 220v', '110 220v', 'bivolt'] },
   ];
 
   for (const regra of regras) {
@@ -498,6 +613,16 @@ function normalizarTexto(texto) {
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizarKeywordScoreKey(keyword) {
+  return String(keyword || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
 }
 
 module.exports = { executarColeta };

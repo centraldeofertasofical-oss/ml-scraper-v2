@@ -4,18 +4,17 @@
  * Fontes:
  *   1. Hub ML — Keywords por intenção de comprador
  *   2. Hub ML — Ganhos Extras
- *   3. Hub ML — Categorias priorizadas por tendências do Pelando
+ *   3. Hub ML — Categorias de apoio
  *   4. Ofertas Relâmpago
  *   5. Ofertas do Dia
  *
- * Correções importantes:
- *   - Busca como comprador por keywords.
- *   - Reduz aleatoriedade de categorias amplas.
- *   - Mantém geração obrigatória de LINK_AFILIADO.
- *   - Só marca no Redis produtos com LINK_AFILIADO válido.
- *   - Não retorna como final produto sem shortlink quando gerarAfiliado=true.
- *   - Mantém deduplicação por ID.
- *   - Adiciona controle de variedade por família.
+ * Ajuste aplicado:
+ *   - Keywords aumentadas para 75% da coleta.
+ *   - Categorias reduzidas para 10%.
+ *   - Ofertas mantidas em 10%.
+ *   - Ganhos Extras ficam com o restante.
+ *   - Busca por keyword mais precisa, sem multiplicar demais o volume bruto.
+ *   - Mantém afiliado, Redis, filtros e variedade por família.
  */
 
 const {
@@ -55,14 +54,15 @@ function calcularScore(produto, scoresCategorias) {
 
   if (produto.GANHO_EXTRA) score += 30;
   if (produto.FONTE === 'OFERTAS') score += 15;
-  if (produto.ORIGEM && String(produto.ORIGEM).startsWith('KEYWORD_')) score += 22;
+  if (produto.ORIGEM && String(produto.ORIGEM).startsWith('KEYWORD_')) score += 30;
 
   if (produto.DESTAQUE === 'MAIS VENDIDO') score += 25;
   if (produto.DESTAQUE === 'OFERTA DO DIA') score += 20;
   if (produto.DESTAQUE === 'RECOMENDADO') score += 10;
 
-  if (produto.PRECO_POR && produto.PRECO_POR <= 60) score += 8;
-  if (produto.PRECO_POR && produto.PRECO_POR <= 120) score += 5;
+  if (produto.PRECO_POR && produto.PRECO_POR <= 60) score += 10;
+  else if (produto.PRECO_POR && produto.PRECO_POR <= 120) score += 7;
+  else if (produto.PRECO_POR && produto.PRECO_POR <= 250) score += 4;
 
   const catScore = scoresCategorias[produto.ORIGEM] || 0;
   score += catScore * 0.5;
@@ -104,10 +104,10 @@ async function executarColeta(opcoes = {}) {
   const temKeywords = keywordsPerfil.length > 0;
   const temCatsExtra = perfil.categorias_extra.length > 0;
 
-  const limiteKeyword = temKeywords ? Math.floor(limite * 0.55) : 0;
-  const limiteCat = temCatsExtra ? Math.floor(limite * 0.15) : 0;
+  const limiteKeyword = temKeywords ? Math.floor(limite * 0.75) : 0;
+  const limiteCat = temCatsExtra ? Math.floor(limite * 0.10) : 0;
   const limiteOfertas = incluirOfertas ? Math.floor(limite * 0.10) : 0;
-  const limiteGE = limite - limiteKeyword - limiteCat - limiteOfertas;
+  const limiteGE = Math.max(0, limite - limiteKeyword - limiteCat - limiteOfertas);
 
   log(
     `[LIMITES] Keywords:${limiteKeyword} | GE:${limiteGE} | Categorias:${limiteCat} | Ofertas:${limiteOfertas} | Total:${limite}`
@@ -130,10 +130,10 @@ async function executarColeta(opcoes = {}) {
 
   let brutos = [];
 
-  // 1. Busca por intenção de comprador
+  // 1. Busca por intenção de comprador — agora é a fonte principal
   if (temKeywords && limiteKeyword > 0) {
-    const keywordsRodada = selecionarKeywordsRodada(keywordsPerfil, 10);
-    const porKeyword = Math.max(3, Math.ceil((limiteKeyword * 3) / keywordsRodada.length));
+    const keywordsRodada = selecionarKeywordsRodada(keywordsPerfil, 12);
+    const porKeyword = Math.max(5, Math.ceil(limiteKeyword / keywordsRodada.length));
 
     log(`[KEYWORDS] Buscando ${keywordsRodada.length} keywords | limite por keyword: ${porKeyword}`);
 
@@ -149,12 +149,12 @@ async function executarColeta(opcoes = {}) {
     }
   }
 
-  // 2. Ganhos Extras
+  // 2. Ganhos Extras — apoio para comissão alta, sem dominar a busca
   if (limiteGE > 0) {
-    log(`[COLETA] Buscando Ganhos Extras (limite bruto: ${limiteGE * 3})...`);
+    log(`[COLETA] Buscando Ganhos Extras (limite bruto: ${limiteGE})...`);
 
     try {
-      const ge = await coletarGanhosExtras(cookie, limiteGE * 3);
+      const ge = await coletarGanhosExtras(cookie, limiteGE);
       brutos.push(...ge);
       log(`[COLETA] Ganhos Extras: ${ge.length} produtos`);
     } catch (e) {
@@ -162,7 +162,7 @@ async function executarColeta(opcoes = {}) {
     }
   }
 
-  // 3. Categorias de apoio
+  // 3. Categorias — agora só apoio, para não trazer produto aleatório demais
   if (temCatsExtra && limiteCat > 0) {
     let categoriasOrdenadas = perfil.categorias_extra;
 
@@ -173,7 +173,7 @@ async function executarColeta(opcoes = {}) {
       err('[TENDENCIAS] Falha ao priorizar — usando ordem padrão:', e.message);
     }
 
-    const porCat = Math.max(3, Math.ceil((limiteCat * 3) / categoriasOrdenadas.length));
+    const porCat = Math.max(3, Math.ceil(limiteCat / categoriasOrdenadas.length));
 
     for (const cat of categoriasOrdenadas) {
       try {
@@ -204,7 +204,7 @@ async function executarColeta(opcoes = {}) {
       ];
 
       log(`[COLETA] Ofertas coletadas: ${itensOfertas.length} (relâmpago + do dia)`);
-      brutos.push(...itensOfertas);
+      brutos.push(...itensOfertas.slice(0, limiteOfertas));
     } catch (e) {
       err('[COLETA] Erro ao coletar ofertas:', e.message);
     }
@@ -226,7 +226,9 @@ async function executarColeta(opcoes = {}) {
       apos_variedade: 0,
       apos_redis: 0,
       validos: 0,
+      sem_afiliado: 0,
       limite_execucao: limite,
+      keywords_usadas: keywordsPerfil.length,
       produtos: [],
     };
   }
@@ -278,7 +280,7 @@ async function executarColeta(opcoes = {}) {
   log(`[FILTRO] Após filtros perfil (${perfil.nome}): ${aposFiltros}`);
 
   validos = aplicarVariedadePorFamilia(validos, {
-    maxPorFamilia: 4,
+    maxPorFamilia: 3,
   });
 
   const aposVariedade = validos.length;
@@ -410,13 +412,15 @@ function aplicarFiltrosPerfil(p, filtros) {
   return true;
 }
 
-function selecionarKeywordsRodada(keywords, limite = 10) {
+function selecionarKeywordsRodada(keywords, limite = 12) {
   const lista = [...new Set(keywords || [])];
 
   if (lista.length <= limite) return lista;
 
-  const dia = new Date().getDate();
-  const inicio = dia % lista.length;
+  const agora = new Date();
+  const dia = agora.getDate();
+  const hora = agora.getHours();
+  const inicio = (dia + hora) % lista.length;
 
   const rotacionadas = [
     ...lista.slice(inicio),
@@ -427,7 +431,7 @@ function selecionarKeywordsRodada(keywords, limite = 10) {
 }
 
 function aplicarVariedadePorFamilia(produtos, opcoes = {}) {
-  const maxPorFamilia = opcoes.maxPorFamilia || 4;
+  const maxPorFamilia = opcoes.maxPorFamilia || 3;
   const contador = {};
   const resultado = [];
 
@@ -454,10 +458,10 @@ function detectarFamiliaProduto(texto) {
     { familia: 'iphone', termos: ['iphone'] },
     { familia: 'celular', termos: ['celular', 'smartphone', 'samsung', 'motorola', 'xiaomi', 'redmi', 'poco'] },
     { familia: 'tenis', termos: ['tenis', 'tênis'] },
-    { familia: 'sapato', termos: ['sapato', 'bota', 'sandalia', 'sandália', 'chinelo'] },
+    { familia: 'sapato', termos: ['sapato', 'bota', 'sandalia', 'sandália', 'chinelo', 'sapateira'] },
     { familia: 'camiseta', termos: ['camiseta', 'camisa', 'polo'] },
     { familia: 'calca', termos: ['calca', 'calça', 'jeans'] },
-    { familia: 'moda_intima', termos: ['cueca', 'calcinha', 'meia', 'lingerie'] },
+    { familia: 'moda_intima', termos: ['cueca', 'calcinha', 'meia', 'lingerie', 'sutia', 'sutiã'] },
     { familia: 'bolsa_mochila', termos: ['bolsa', 'mochila', 'carteira'] },
     { familia: 'fitness', termos: ['academia', 'fitness', 'dry fit', 'legging', 'short academia'] },
     { familia: 'suplemento', termos: ['creatina', 'whey', 'pre treino', 'pré treino', 'suplemento'] },
@@ -465,12 +469,14 @@ function detectarFamiliaProduto(texto) {
     { familia: 'smartwatch', termos: ['smartwatch', 'relogio inteligente', 'relógio inteligente'] },
     { familia: 'organizador', termos: ['organizador', 'organizacao', 'organização'] },
     { familia: 'tapete', termos: ['tapete'] },
-    { familia: 'cozinha', termos: ['cozinha', 'panela', 'pote', 'escorredor'] },
-    { familia: 'cama_banho', termos: ['jogo de cama', 'edredom', 'toalha', 'banheiro'] },
-    { familia: 'beleza', termos: ['perfume', 'shampoo', 'hidratante', 'maquiagem', 'skincare'] },
+    { familia: 'garrafa_copo', termos: ['garrafa', 'copo termico', 'copo térmico', 'squeeze', 'cuia'] },
+    { familia: 'cozinha', termos: ['cozinha', 'panela', 'pote', 'escorredor', 'air fryer', 'fritadeira', 'torradeira', 'sanduicheira', 'processador'] },
+    { familia: 'cama_banho', termos: ['jogo de cama', 'edredom', 'coberdrom', 'coberta', 'toalha', 'banheiro', 'lencol', 'lençol'] },
+    { familia: 'beleza', termos: ['perfume', 'body splash', 'shampoo', 'hidratante', 'maquiagem', 'skincare'] },
     { familia: 'cabelo', termos: ['secador', 'chapinha', 'escova secadora', 'prancha'] },
-    { familia: 'ferramenta', termos: ['furadeira', 'parafusadeira', 'ferramenta', 'trena'] },
+    { familia: 'ferramenta', termos: ['furadeira', 'parafusadeira', 'ferramenta', 'trena', 'esmerilhadeira'] },
     { familia: 'auto', termos: ['carro', 'automotivo', 'pneu', 'calibrador'] },
+    { familia: 'eletro_220v', termos: ['220v', '127/220v', 'bivolt'] },
   ];
 
   for (const regra of regras) {

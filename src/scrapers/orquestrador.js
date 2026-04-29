@@ -2,21 +2,39 @@
  * orquestrador.js — Coleta completa integrada
  *
  * Fontes:
- *   1. Hub ML — Ganhos Extras (comissão elevada)
- *   2. Hub ML — Categorias priorizadas por tendências do Pelando
- *   3. Ofertas Relâmpago
- *   4. Ofertas do Dia
+ *   1. Hub ML — Keywords por intenção de comprador
+ *   2. Hub ML — Ganhos Extras
+ *   3. Hub ML — Categorias priorizadas por tendências do Pelando
+ *   4. Ofertas Relâmpago
+ *   5. Ofertas do Dia
  *
  * Correções importantes:
+ *   - Busca como comprador por keywords.
+ *   - Reduz aleatoriedade de categorias amplas.
+ *   - Mantém geração obrigatória de LINK_AFILIADO.
  *   - Só marca no Redis produtos com LINK_AFILIADO válido.
  *   - Não retorna como final produto sem shortlink quando gerarAfiliado=true.
  *   - Mantém deduplicação por ID.
+ *   - Adiciona controle de variedade por família.
  */
 
-const { settings, FILTROS_GLOBAIS, PERFIS } = require('../config/settings');
-const { coletarGanhosExtras, coletarCategoria, getCategoriasPriorizadas } = require('./hub');
+const {
+  settings,
+  FILTROS_GLOBAIS,
+  PERFIS,
+  KEYWORDS_POR_PERFIL,
+} = require('../config/settings');
+
+const {
+  coletarGanhosExtras,
+  coletarCategoria,
+  coletarKeyword,
+  getCategoriasPriorizadas,
+} = require('./hub');
+
 const { scraparTodasOfertas } = require('./ofertas');
 const { processarLoteAfiliado } = require('./afiliado');
+
 const {
   getCookie,
   jaPostado,
@@ -26,6 +44,7 @@ const {
   getScoreCategoria,
   atualizarScoreCategoria,
 } = require('../utils/redis');
+
 const { log, err } = require('../utils/logger');
 
 function calcularScore(produto, scoresCategorias) {
@@ -36,10 +55,14 @@ function calcularScore(produto, scoresCategorias) {
 
   if (produto.GANHO_EXTRA) score += 30;
   if (produto.FONTE === 'OFERTAS') score += 15;
+  if (produto.ORIGEM && String(produto.ORIGEM).startsWith('KEYWORD_')) score += 22;
 
   if (produto.DESTAQUE === 'MAIS VENDIDO') score += 25;
   if (produto.DESTAQUE === 'OFERTA DO DIA') score += 20;
   if (produto.DESTAQUE === 'RECOMENDADO') score += 10;
+
+  if (produto.PRECO_POR && produto.PRECO_POR <= 60) score += 8;
+  if (produto.PRECO_POR && produto.PRECO_POR <= 120) score += 5;
 
   const catScore = scoresCategorias[produto.ORIGEM] || 0;
   score += catScore * 0.5;
@@ -76,12 +99,19 @@ async function executarColeta(opcoes = {}) {
   }
 
   const limite = settings.LIMITE_POR_EXECUCAO;
-  const temCatsExtra = perfil.categorias_extra.length > 0;
-  const limiteCat = temCatsExtra ? Math.floor(limite * 0.35) : 0;
-  const limiteOfertas = incluirOfertas ? Math.floor(limite * 0.25) : 0;
-  const limiteGE = limite - limiteCat - limiteOfertas;
+  const keywordsPerfil = KEYWORDS_POR_PERFIL[perfil.id] || [];
 
-  log(`[LIMITES] GE:${limiteGE} | Categorias:${limiteCat} | Ofertas:${limiteOfertas} | Total:${limite}`);
+  const temKeywords = keywordsPerfil.length > 0;
+  const temCatsExtra = perfil.categorias_extra.length > 0;
+
+  const limiteKeyword = temKeywords ? Math.floor(limite * 0.55) : 0;
+  const limiteCat = temCatsExtra ? Math.floor(limite * 0.15) : 0;
+  const limiteOfertas = incluirOfertas ? Math.floor(limite * 0.10) : 0;
+  const limiteGE = limite - limiteKeyword - limiteCat - limiteOfertas;
+
+  log(
+    `[LIMITES] Keywords:${limiteKeyword} | GE:${limiteGE} | Categorias:${limiteCat} | Ofertas:${limiteOfertas} | Total:${limite}`
+  );
 
   const scoresCategorias = {};
 
@@ -90,8 +120,8 @@ async function executarColeta(opcoes = {}) {
       scoresCategorias[`CAT_${cat}`] = await getScoreCategoria(cat);
     }
 
-    scoresCategorias['OFERTA_LIGHTNING'] = await getScoreCategoria('OFERTA_LIGHTNING');
-    scoresCategorias['OFERTA_DEAL_OF_THE_DAY'] = await getScoreCategoria('OFERTA_DEAL_OF_THE_DAY');
+    scoresCategorias.OFERTA_LIGHTNING = await getScoreCategoria('OFERTA_LIGHTNING');
+    scoresCategorias.OFERTA_DEAL_OF_THE_DAY = await getScoreCategoria('OFERTA_DEAL_OF_THE_DAY');
 
     log('[SCORE] Scores históricos carregados:', JSON.stringify(scoresCategorias));
   } catch (e) {
@@ -100,16 +130,39 @@ async function executarColeta(opcoes = {}) {
 
   let brutos = [];
 
-  log(`[COLETA] Buscando Ganhos Extras (limite bruto: ${limiteGE * 3})...`);
+  // 1. Busca por intenção de comprador
+  if (temKeywords && limiteKeyword > 0) {
+    const keywordsRodada = selecionarKeywordsRodada(keywordsPerfil, 10);
+    const porKeyword = Math.max(3, Math.ceil((limiteKeyword * 3) / keywordsRodada.length));
 
-  try {
-    const ge = await coletarGanhosExtras(cookie, limiteGE * 3);
-    brutos.push(...ge);
-    log(`[COLETA] Ganhos Extras: ${ge.length} produtos`);
-  } catch (e) {
-    err('[COLETA] Erro Ganhos Extras:', e.message);
+    log(`[KEYWORDS] Buscando ${keywordsRodada.length} keywords | limite por keyword: ${porKeyword}`);
+
+    for (const kw of keywordsRodada) {
+      try {
+        log(`[KEYWORD] Buscando: "${kw}"`);
+        const items = await coletarKeyword(cookie, kw, porKeyword);
+        brutos.push(...items);
+        log(`[KEYWORD] "${kw}": ${items.length} produtos`);
+      } catch (e) {
+        err(`[KEYWORD] Erro "${kw}":`, e.message);
+      }
+    }
   }
 
+  // 2. Ganhos Extras
+  if (limiteGE > 0) {
+    log(`[COLETA] Buscando Ganhos Extras (limite bruto: ${limiteGE * 3})...`);
+
+    try {
+      const ge = await coletarGanhosExtras(cookie, limiteGE * 3);
+      brutos.push(...ge);
+      log(`[COLETA] Ganhos Extras: ${ge.length} produtos`);
+    } catch (e) {
+      err('[COLETA] Erro Ganhos Extras:', e.message);
+    }
+  }
+
+  // 3. Categorias de apoio
   if (temCatsExtra && limiteCat > 0) {
     let categoriasOrdenadas = perfil.categorias_extra;
 
@@ -120,7 +173,7 @@ async function executarColeta(opcoes = {}) {
       err('[TENDENCIAS] Falha ao priorizar — usando ordem padrão:', e.message);
     }
 
-    const porCat = Math.ceil((limiteCat * 3) / categoriasOrdenadas.length);
+    const porCat = Math.max(3, Math.ceil((limiteCat * 3) / categoriasOrdenadas.length));
 
     for (const cat of categoriasOrdenadas) {
       try {
@@ -134,6 +187,7 @@ async function executarColeta(opcoes = {}) {
     }
   }
 
+  // 4. Ofertas Relâmpago e Ofertas do Dia
   if (incluirOfertas && limiteOfertas > 0) {
     try {
       log('[COLETA] Buscando Ofertas Relâmpago e Ofertas do Dia...');
@@ -169,6 +223,7 @@ async function executarColeta(opcoes = {}) {
       brutos: 0,
       apos_dedup: 0,
       apos_filtros: 0,
+      apos_variedade: 0,
       apos_redis: 0,
       validos: 0,
       limite_execucao: limite,
@@ -221,6 +276,14 @@ async function executarColeta(opcoes = {}) {
   const aposFiltros = validos.length;
 
   log(`[FILTRO] Após filtros perfil (${perfil.nome}): ${aposFiltros}`);
+
+  validos = aplicarVariedadePorFamilia(validos, {
+    maxPorFamilia: 4,
+  });
+
+  const aposVariedade = validos.length;
+
+  log(`[VARIEDADE] Após limite por família: ${aposVariedade}`);
 
   let aposRedis = validos;
 
@@ -294,10 +357,12 @@ async function executarColeta(opcoes = {}) {
     brutos: totalBrutos,
     apos_dedup: aposDedup,
     apos_filtros: aposFiltros,
+    apos_variedade: aposVariedade,
     apos_redis: aposRedis.length,
     validos: finais.length,
     sem_afiliado: produtosSemAfiliado.length,
     limite_execucao: limite,
+    keywords_usadas: keywordsPerfil.length,
     produtos: finais,
   };
 }
@@ -325,6 +390,8 @@ function aplicarFiltrosGlobais(p) {
 }
 
 function aplicarFiltrosPerfil(p, filtros) {
+  if (!filtros) return true;
+
   if (
     filtros.comissao_min > 0 &&
     (p.COMISSAO_PCT === null || p.COMISSAO_PCT < filtros.comissao_min)
@@ -341,6 +408,90 @@ function aplicarFiltrosPerfil(p, filtros) {
   }
 
   return true;
+}
+
+function selecionarKeywordsRodada(keywords, limite = 10) {
+  const lista = [...new Set(keywords || [])];
+
+  if (lista.length <= limite) return lista;
+
+  const dia = new Date().getDate();
+  const inicio = dia % lista.length;
+
+  const rotacionadas = [
+    ...lista.slice(inicio),
+    ...lista.slice(0, inicio),
+  ];
+
+  return rotacionadas.slice(0, limite);
+}
+
+function aplicarVariedadePorFamilia(produtos, opcoes = {}) {
+  const maxPorFamilia = opcoes.maxPorFamilia || 4;
+  const contador = {};
+  const resultado = [];
+
+  for (const p of produtos) {
+    const familia = detectarFamiliaProduto(p.PRODUTO || p.KEYWORD_BUSCA || p.ORIGEM || 'geral');
+
+    p.FAMILIA_OFERTA = familia;
+
+    contador[familia] = contador[familia] || 0;
+
+    if (contador[familia] >= maxPorFamilia) continue;
+
+    contador[familia]++;
+    resultado.push(p);
+  }
+
+  return resultado;
+}
+
+function detectarFamiliaProduto(texto) {
+  const t = normalizarTexto(texto);
+
+  const regras = [
+    { familia: 'iphone', termos: ['iphone'] },
+    { familia: 'celular', termos: ['celular', 'smartphone', 'samsung', 'motorola', 'xiaomi', 'redmi', 'poco'] },
+    { familia: 'tenis', termos: ['tenis', 'tênis'] },
+    { familia: 'sapato', termos: ['sapato', 'bota', 'sandalia', 'sandália', 'chinelo'] },
+    { familia: 'camiseta', termos: ['camiseta', 'camisa', 'polo'] },
+    { familia: 'calca', termos: ['calca', 'calça', 'jeans'] },
+    { familia: 'moda_intima', termos: ['cueca', 'calcinha', 'meia', 'lingerie'] },
+    { familia: 'bolsa_mochila', termos: ['bolsa', 'mochila', 'carteira'] },
+    { familia: 'fitness', termos: ['academia', 'fitness', 'dry fit', 'legging', 'short academia'] },
+    { familia: 'suplemento', termos: ['creatina', 'whey', 'pre treino', 'pré treino', 'suplemento'] },
+    { familia: 'fone', termos: ['fone', 'headphone', 'bluetooth'] },
+    { familia: 'smartwatch', termos: ['smartwatch', 'relogio inteligente', 'relógio inteligente'] },
+    { familia: 'organizador', termos: ['organizador', 'organizacao', 'organização'] },
+    { familia: 'tapete', termos: ['tapete'] },
+    { familia: 'cozinha', termos: ['cozinha', 'panela', 'pote', 'escorredor'] },
+    { familia: 'cama_banho', termos: ['jogo de cama', 'edredom', 'toalha', 'banheiro'] },
+    { familia: 'beleza', termos: ['perfume', 'shampoo', 'hidratante', 'maquiagem', 'skincare'] },
+    { familia: 'cabelo', termos: ['secador', 'chapinha', 'escova secadora', 'prancha'] },
+    { familia: 'ferramenta', termos: ['furadeira', 'parafusadeira', 'ferramenta', 'trena'] },
+    { familia: 'auto', termos: ['carro', 'automotivo', 'pneu', 'calibrador'] },
+  ];
+
+  for (const regra of regras) {
+    if (regra.termos.some(termo => t.includes(normalizarTexto(termo)))) {
+      return regra.familia;
+    }
+  }
+
+  const primeiraPalavra = t.split(' ').filter(Boolean)[0];
+
+  return primeiraPalavra || 'geral';
+}
+
+function normalizarTexto(texto) {
+  return String(texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 module.exports = { executarColeta };
